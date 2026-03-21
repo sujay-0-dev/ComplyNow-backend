@@ -128,9 +128,7 @@ async function submitAuditToWorker({
   harTraffic,
   targetBaseUrl
 }) {
-  const workerUrl = process.env.WORKER_URL;
-  if (!workerUrl) throw new Error("WORKER_URL environment variable is not configured");
-
+  const workerUrl = process.env.WORKER_URL || "http://localhost:8000";
   const requestId = crypto.randomUUID();
   let finalPrivacyText = privacyPolicyText || null;
   let openApiSpec = null;
@@ -167,30 +165,33 @@ async function submitAuditToWorker({
 
   logger.info(`Submitting audit [${requestId}] to worker: ${workerUrl}/run-audit`);
 
-  const workerResponse = await fetch(`${workerUrl}/run-audit`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Request-ID': requestId
-    },
-    body: JSON.stringify(requestPayload)
-  });
+  try {
+    const response = await fetch(`${workerUrl}/run-audit`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(requestPayload),
+      // 5-minute timeout for deep AI analysis
+      signal: AbortSignal.timeout(300000)
+    });
 
-  if (!workerResponse.ok) {
-    const errorBody = await workerResponse.text();
-    throw new Error(`Worker returned ${workerResponse.status}: ${errorBody}`);
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Worker responded with ${response.status}: ${errText}`);
+    }
+
+    const workerResponse = await response.json();
+
+    return {
+      requestId,
+      result: workerResponse,
+      requestlyImportPayload: workerResponse.requestly_bundle || null
+    };
+  } catch (error) {
+    logger.error(`Failed executing audit on worker: ${error.message}`);
+    throw error;
   }
-
-  const result = await workerResponse.json();
-
-  // 5. Build Requestly payload if simulations exist
-  const requestlyImportPayload = buildRequestlySharedList(result.fix_simulations);
-
-  return {
-    requestId,
-    result,
-    requestlyImportPayload
-  };
 }
 
 module.exports = {
