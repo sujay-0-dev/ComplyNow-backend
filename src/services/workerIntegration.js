@@ -134,23 +134,39 @@ async function submitAuditToWorker({
   let openApiSpec = null;
   let probedHeaders = null;
 
-  // 1 & 2. Probe BaseUrl details if provided and combined/traffic mode
-  if (targetBaseUrl && ['combined', 'traffic'].includes(auditMode)) {
+  // Map frontend modes ('api', 'document', 'combined') to v2 worker modes ('traffic', 'document', 'combined')
+  let mappedWorkerMode = (auditMode === 'api') ? 'traffic' : auditMode;
+  if (!['document', 'traffic', 'combined'].includes(mappedWorkerMode)) {
+    mappedWorkerMode = 'combined'; // Safe default
+  }
+
+  // 1 & 2. Probe BaseUrl details if provided. Frontend sends targetBaseUrl across all modes if scanning a URL.
+  // In 'api'/'traffic' or 'combined' mode, we probe the API endpoints.
+  if (targetBaseUrl && ['combined', 'traffic', 'api'].includes(auditMode)) {
     openApiSpec = await fetchOpenApiSpec(targetBaseUrl);
     probedHeaders = await probeSecurityHeaders(targetBaseUrl);
   }
 
-  // 3. Privacy Policy
-  if (!finalPrivacyText && privacyPolicyUrl) {
-    finalPrivacyText = await fetchPrivacyPolicy(privacyPolicyUrl);
+  // 3. Privacy Policy. If privacyPolicyUrl is missing, use targetBaseUrl if they want a policy scanned.
+  const policyTargetUrl = privacyPolicyUrl || (['combined', 'document'].includes(auditMode) ? targetBaseUrl : null);
+  if (!finalPrivacyText && policyTargetUrl) {
+    finalPrivacyText = await fetchPrivacyPolicy(policyTargetUrl);
   }
 
   // 4. Validate HAR
   const validatedHar = validateHar(harTraffic);
 
+  // 5. Enforce Data Extraction before hitting worker (Fix for 100% compliant dead URLs)
+  const hasDocuments = finalPrivacyText || apiText || dbSchemaText;
+  const hasLiveData = validatedHar || openApiSpec || probedHeaders;
+  
+  if (!hasDocuments && !hasLiveData) {
+    throw new Error("NO_DATA_EXTRACTED: Could not extract any valid compliance data from the remote URL or provided inputs.");
+  }
+
   // Construct Contract v2.0 Request
   const requestPayload = {
-    audit_mode: auditMode,
+    audit_mode: mappedWorkerMode,
     documents: {
       privacy_policy_text: finalPrivacyText ? finalPrivacyText.trim().slice(0, 50000) : null,
       api_text: apiText ? apiText.trim().slice(0, 50000) : null,

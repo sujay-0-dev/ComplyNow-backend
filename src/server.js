@@ -12,12 +12,22 @@ const { initPostgres, query } = require('./db/postgres');
 const AuditReport = require('./models/AuditReport');
 
 const app = express();
+const cors = require('cors');
 
+app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' })); // Max limit for Har files
 
 // Requestly rules engine (active — may modify/block requests)
 app.use(requestlyRulesMiddleware());
+
+// Mount Auth Routes
+const authRoutes = require('./routes/auth');
+app.use('/api/v1/auth', authRoutes);
+
+// Mount Requestly Admin/Mock Routes
+const requestlyRoutes = require('./routes/requestly');
+app.use('/requestly', requestlyRoutes);
 
 // Health Check
 app.get('/api/v1/health', async (req, res) => {
@@ -41,8 +51,10 @@ app.get('/api/v1/health', async (req, res) => {
   res.json(health);
 });
 
+const authenticate = require('./middleware/authenticate');
+
 // 1. Submit Audit (Enqueue Background Job)
-app.post('/api/v1/audits', async (req, res) => {
+app.post('/api/v1/audits', authenticate, async (req, res) => {
   try {
     const { auditMode, targetBaseUrl, privacyPolicyUrl, privacyPolicyText, apiText, dbSchemaText, harTraffic } = req.body;
     
@@ -54,9 +66,10 @@ app.post('/api/v1/audits', async (req, res) => {
     // Generate a job ID explicitly so we can insert it into Postgres first
     const { v4: uuidv4 } = require('uuid');
     const jobId = uuidv4();
+    const userId = req.user.id;
 
     // 💾 Initialize Postgres tracking metadata first
-    await query(`INSERT INTO audits (id, status) VALUES ($1, $2)`, [jobId, 'queued']);
+    await query(`INSERT INTO audits (id, user_id, status) VALUES ($1, $2, $3)`, [jobId, userId, 'queued']);
 
     try {
       // Push the heavy job to Redis/BullMQ with the explicit jobId
@@ -80,11 +93,24 @@ app.post('/api/v1/audits', async (req, res) => {
   }
 });
 
-// 2. Poll Status (Reads from PG)
-app.get('/api/v1/audits/:id', async (req, res) => {
+// 1.5 Fetch Audit History (Reads from PG)
+app.get('/api/v1/audits/history', authenticate, async (req, res) => {
   try {
-    const dbRes = await query(`SELECT status, score FROM audits WHERE id = $1`, [req.params.id]);
-    if (dbRes.rowCount === 0) return res.status(404).json({ error: 'Audit job not found' });
+    const dbRes = await query(
+      `SELECT id, status, score, created_at, updated_at FROM audits WHERE user_id = $1 ORDER BY created_at DESC`,
+      [req.user.id]
+    );
+    res.json({ history: dbRes.rows });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch audit history', details: err.message });
+  }
+});
+
+// 2. Poll Status (Reads from PG)
+app.get('/api/v1/audits/:id', authenticate, async (req, res) => {
+  try {
+    const dbRes = await query(`SELECT status, score FROM audits WHERE id = $1 AND user_id = $2`, [req.params.id, req.user.id]);
+    if (dbRes.rowCount === 0) return res.status(404).json({ error: 'Audit job not found for this user' });
     
     // Fetch live progress from Redis Queue if it's still running
     const job = await auditQueue.getJob(req.params.id);
@@ -102,11 +128,11 @@ app.get('/api/v1/audits/:id', async (req, res) => {
 });
 
 // 3. Fetch Final Report (Reads from MongoDB)
-app.get('/api/v1/audits/:id/report', async (req, res) => {
+app.get('/api/v1/audits/:id/report', authenticate, async (req, res) => {
   try {
-    // Check if PG considers it done
-    const dbRes = await query(`SELECT status FROM audits WHERE id = $1`, [req.params.id]);
-    if (dbRes.rowCount === 0) return res.status(404).json({ error: 'Audit job not found' });
+    // Check if PG considers it done AND belongs to user
+    const dbRes = await query(`SELECT status FROM audits WHERE id = $1 AND user_id = $2`, [req.params.id, req.user.id]);
+    if (dbRes.rowCount === 0) return res.status(404).json({ error: 'Audit job not found for this user' });
     if (dbRes.rows[0].status !== 'completed') {
       return res.status(400).json({ error: `Report not ready. Status: ${dbRes.rows[0].status}` });
     }

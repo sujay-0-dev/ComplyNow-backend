@@ -21,6 +21,7 @@ AUDIT_ID=$(curl -s -X POST http://localhost:3000/api/v1/audits \
   -d "$WORKER_PAYLOAD" | jq -r '.auditJobId')
 
 echo "Queued Background Job ID: $AUDIT_ID"
+curl http://localhost:3000/requestly/mock/audits/mock-audit-12345/report
 echo -e "\n\n"
 
 echo "----------------------------------------"
@@ -45,3 +46,12 @@ curl -s http://localhost:3000/api/v1/audits/$AUDIT_ID/report | jq || curl -s htt
 echo -e "\n\n"
 
 echo "Done! The async BullMQ endpoints have been explicitly tested."
+
+
+# Requestly
+
+curl http://localhost:3000/requestly/mock/audits/mock-audit-12345
+
+
+curl http://localhost:3000/requestly/mock/audits/mock-audit-12345/report
+echo -e "\n\n"
