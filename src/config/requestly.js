@@ -1,5 +1,5 @@
 const logger = require('../utils/logger');
-
+const authController = require("../controllers/authController");
 /**
  * Splits a comma-separated string into a trimmed array.
  * @param {string} str 
@@ -44,7 +44,7 @@ const config = {
   mock: {
     enabled: process.env.REQUESTLY_MOCK_ENABLED === 'true',
     routePrefix: process.env.REQUESTLY_MOCK_PREFIX || '/requestly',
-    allowedEnvs: mockEnvs,
+    allowedEnvs: ["development", "local", "dev"]
   },
   har: {
     enabled: process.env.REQUESTLY_HAR_ENABLED === 'true',

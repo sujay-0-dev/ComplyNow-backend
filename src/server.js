@@ -1,6 +1,7 @@
+require("dotenv").config();
 const express = require('express');
 const mongoose = require('mongoose');
-const { Pool } = require('pg');
+const pgPool = require('./config/db');
 const Redis = require('ioredis');
 const logger = require('./utils/logger');
 const { submitAuditToWorker } = require('./services/workerIntegration');
@@ -95,7 +96,6 @@ app.use((err, req, res, next) => {
 });
 
 let serverInstance = null;
-let pgPool = null;
 let redisClient = null;
 
 async function bootstrap() {
@@ -106,13 +106,6 @@ async function bootstrap() {
     logger.info('✅ MongoDB connected');
 
     // PostgreSQL Connection
-    pgPool = new Pool({
-      user: process.env.POSTGRES_USER || 'complynow',
-      password: process.env.POSTGRES_PASSWORD || 'password',
-      host: process.env.POSTGRES_HOST || 'localhost',
-      port: process.env.POSTGRES_PORT || 5432,
-      database: process.env.POSTGRES_DB || 'complynow',
-    });
     await pgPool.query('SELECT 1');
     logger.info('✅ PostgreSQL connected');
     
@@ -173,4 +166,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, bootstrap };
+module.exports = { app, bootstrap};

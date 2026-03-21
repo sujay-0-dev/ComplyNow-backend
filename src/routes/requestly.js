@@ -7,6 +7,7 @@ const { getHarEntries, clearHarEntries } = require('../middleware/requestlyHar')
 const { loadRules } = require('../middleware/requestlyRules');
 
 const router = express.Router();
+const jwt = require("jsonwebtoken");
 
 // Guard Middleware
 router.use((req, res, next) => {
@@ -45,6 +46,42 @@ router.get('/mock/auth/login', (req, res) => {
       plan: "pro"
     }
   });
+});
+const authController = require("../controllers/authController");
+
+// 🔐 REAL AUTH ROUTES
+router.post('/auth/register', authController.register);
+router.post('/auth/login', authController.login);
+
+// ✅ REAL JWT LOGIN (for Requestly testing)
+router.post('/auth/login', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    // Temporary user (later connect with DB)
+    const user = {
+      id: "user-1",
+      email: email
+    };
+
+    const token = jwt.sign(
+      user,
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" }
+    );
+
+    res.json({
+      message: "Login successful",
+      token
+    });
+
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // POST /requestly/mock/audits
