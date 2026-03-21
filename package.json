@@ -1,0 +1,21 @@
+{
+  "name": "complynow-backend",
+  "version": "1.0.0",
+  "description": "ComplyNow backend integration with Requestly",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --env-file=.env src/server.js",
+    "dev": "node --env-file=.env src/server.js",
+    "test": "node src/tests/requestly.test.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "http-proxy-agent": "^7.0.2",
+    "https-proxy-agent": "^7.0.5",
+    "ioredis": "^5.4.1",
+    "mongoose": "^9.3.1",
+    "pg": "^8.20.0",
+    "uuid": "^10.0.0",
+    "winston": "^3.13.1"
+  }
+}
