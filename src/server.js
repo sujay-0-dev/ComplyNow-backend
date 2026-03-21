@@ -1,32 +1,31 @@
-require("dotenv").config();
 const express = require('express');
 const mongoose = require('mongoose');
-const pgPool = require('./config/db');
 const Redis = require('ioredis');
 const logger = require('./utils/logger');
-const { submitAuditToWorker } = require('./services/workerIntegration');
 const requestlyConfig = require('./config/requestly');
 const { applyRequestlyProxy, removeRequestlyProxy } = require('./middleware/requestlyProxy');
-const { requestlyHarMiddleware } = require('./middleware/requestlyHar');
 const { requestlyRulesMiddleware, loadRules } = require('./middleware/requestlyRules');
-const requestlyRoutes = require('./routes/requestly');
+
+// Import the background Queue and DBs
+const { auditQueue } = require('./queue/auditQueue');
+const { initPostgres, query } = require('./db/postgres');
+const AuditReport = require('./models/AuditReport');
 
 const app = express();
+const cors = require('cors');
 
-// Basic middleware needed for the application
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
-
-// Middleware registration (order matters — add AFTER security middleware, BEFORE routes):
-// Requestly HAR recorder (passive — just records)
-if (requestlyConfig.har.enabled) {
-  app.use(requestlyHarMiddleware());
-}
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' })); // Max limit for Har files
 
 // Requestly rules engine (active — may modify/block requests)
 app.use(requestlyRulesMiddleware());
 
-// Existing ComplyNow Routes
+// Mount Requestly Admin/Mock Routes
+const requestlyRoutes = require('./routes/requestly');
+app.use('/requestly', requestlyRoutes);
+
+// Health Check
 app.get('/api/v1/health', async (req, res) => {
   const health = {
     status: 'ok',
@@ -38,56 +37,95 @@ app.get('/api/v1/health', async (req, res) => {
     }
   };
 
-  if (pgPool) {
-    try {
-      await pgPool.query('SELECT 1');
-      health.dependencies.postgresql = 'connected';
-    } catch (e) {
-      health.dependencies.postgresql = 'error';
-    }
+  try {
+    await query('SELECT 1');
+    health.dependencies.postgresql = 'connected';
+  } catch (e) {
+    health.dependencies.postgresql = 'error';
   }
 
   res.json(health);
 });
 
+// 1. Submit Audit (Enqueue Background Job)
 app.post('/api/v1/audits', async (req, res) => {
   try {
     const { auditMode, targetBaseUrl, privacyPolicyUrl, privacyPolicyText, apiText, dbSchemaText, harTraffic } = req.body;
     
-    // Fast path bypass to dummy response if worker is disabled
-    if (!process.env.WORKER_URL) {
-      return res.json({ message: 'Audit triggered (Mocked - configure WORKER_URL)', auditJobId: req.body.auditJobId || 'real-audit-1' });
+    // Validate that at least one form of input exists
+    if (!targetBaseUrl && !privacyPolicyUrl && !privacyPolicyText && !apiText && !dbSchemaText && !harTraffic) {
+      return res.status(400).json({ error: 'Payload validation failed: No valid audit inputs provided.' });
     }
 
-    const workerResult = await submitAuditToWorker({
-      auditMode,
-      targetBaseUrl,
-      privacyPolicyUrl,
-      privacyPolicyText,
-      apiText,
-      dbSchemaText,
-      harTraffic
-    });
+    // Generate a job ID explicitly so we can insert it into Postgres first
+    const { v4: uuidv4 } = require('uuid');
+    const jobId = uuidv4();
 
-    res.json({
-      message: 'Audit completed successfully',
-      requestId: workerResult.requestId,
-      workerResponse: workerResult.result,
-      requestlyMockData: workerResult.requestlyImportPayload
-    });
+    // 💾 Initialize Postgres tracking metadata first
+    await query(`INSERT INTO audits (id, status) VALUES ($1, $2)`, [jobId, 'queued']);
+
+    try {
+      // Push the heavy job to Redis/BullMQ with the explicit jobId
+      const job = await auditQueue.add('process-audit', {
+        auditMode, targetBaseUrl, privacyPolicyUrl, privacyPolicyText, apiText, dbSchemaText, harTraffic
+      }, { jobId });
+
+      res.status(202).json({
+        message: 'Audit queued successfully',
+        auditJobId: job.id,
+        status: 'queued'
+      });
+    } catch (queueErr) {
+      // Rollback Postgres if queueing fails
+      await query(`DELETE FROM audits WHERE id = $1`, [jobId]);
+      throw queueErr;
+    }
   } catch (err) {
-    logger.error(`Audit worker failed: ${err.message}`);
-    // Return graceful 500
-    res.status(500).json({ error: 'Worker integration error', details: err.message });
+    logger.error(`Audit queueing failed: ${err.message}`);
+    res.status(500).json({ error: 'Queue/DB integration error', details: err.message });
   }
 });
 
-app.get('/api/v1/audits/:id/report', (req, res) => {
-  res.json({ report: `Report for audit ${req.params.id}`, summary: { overallScore: 80 } });
+// 2. Poll Status (Reads from PG)
+app.get('/api/v1/audits/:id', async (req, res) => {
+  try {
+    const dbRes = await query(`SELECT status, score FROM audits WHERE id = $1`, [req.params.id]);
+    if (dbRes.rowCount === 0) return res.status(404).json({ error: 'Audit job not found' });
+    
+    // Fetch live progress from Redis Queue if it's still running
+    const job = await auditQueue.getJob(req.params.id);
+    const progress = job ? job.progress : 100;
+    
+    res.json({
+      auditJobId: req.params.id,
+      status: dbRes.rows[0].status,
+      score: dbRes.rows[0].score, // Only populated if finished
+      progress
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Requestly Route registration (add with other API routes):
-app.use(requestlyConfig.mock.routePrefix, requestlyRoutes);
+// 3. Fetch Final Report (Reads from MongoDB)
+app.get('/api/v1/audits/:id/report', async (req, res) => {
+  try {
+    // Check if PG considers it done
+    const dbRes = await query(`SELECT status FROM audits WHERE id = $1`, [req.params.id]);
+    if (dbRes.rowCount === 0) return res.status(404).json({ error: 'Audit job not found' });
+    if (dbRes.rows[0].status !== 'completed') {
+      return res.status(400).json({ error: `Report not ready. Status: ${dbRes.rows[0].status}` });
+    }
+
+    // Fetch the raw massive structural object from Mongo
+    const report = await AuditReport.findOne({ jobId: req.params.id }, '-_id -__v');
+    if (!report) return res.status(404).json({ error: 'Report data missing from MongoDB. It may have expired.' });
+
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Error Handler
 app.use((err, req, res, next) => {
@@ -105,9 +143,8 @@ async function bootstrap() {
     await mongoose.connect(mongoUri);
     logger.info('✅ MongoDB connected');
 
-    // PostgreSQL Connection
-    await pgPool.query('SELECT 1');
-    logger.info('✅ PostgreSQL connected');
+    // Automatically scaffold the PG schema
+    await initPostgres();
     
     // Redis Connection for health checks
     redisClient = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
@@ -122,7 +159,7 @@ async function bootstrap() {
       logger.warn('Redis global connection failed: ' + err.message);
     }
   } catch (dbErr) {
-    logger.error(`Database connection failed: ${dbErr.message}. The server will continue without DBs for mock endpoints.`);
+    logger.error(`Database connection failed: ${dbErr.message}. The server will continue gracefully.`);
   }
 
   // Requestly proxy setup (must be before any outbound requests)
@@ -166,4 +203,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, bootstrap};
+module.exports = { app, bootstrap };
