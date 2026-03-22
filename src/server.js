@@ -56,10 +56,17 @@ const authenticate = require('./middleware/authenticate');
 // 1. Submit Audit (Enqueue Background Job)
 app.post('/api/v1/audits', authenticate, async (req, res) => {
   try {
-    const { auditMode, targetBaseUrl, privacyPolicyUrl, privacyPolicyText, apiText, dbSchemaText, harTraffic } = req.body;
+    const { audit_mode, auditMode, targetBaseUrl, privacyPolicyUrl, documents, live_data, privacyPolicyText, apiText, dbSchemaText, harTraffic } = req.body;
     
+    // Support either legacy flat fields or v2.0 nested 'documents' structure
+    const finalAuditMode = audit_mode || auditMode || 'combined';
+    const finalApiText = documents?.api_text !== undefined ? documents.api_text : apiText;
+    const finalPrivacyPolicyText = documents?.privacy_policy_text !== undefined ? documents.privacy_policy_text : privacyPolicyText;
+    const finalDbSchemaText = documents?.db_schema_text !== undefined ? documents.db_schema_text : dbSchemaText;
+    const finalHarTraffic = live_data?.har_traffic !== undefined ? live_data.har_traffic : harTraffic;
+
     // Validate that at least one form of input exists
-    if (!targetBaseUrl && !privacyPolicyUrl && !privacyPolicyText && !apiText && !dbSchemaText && !harTraffic) {
+    if (!targetBaseUrl && !privacyPolicyUrl && !finalPrivacyPolicyText && !finalApiText && !finalDbSchemaText && !finalHarTraffic) {
       return res.status(400).json({ error: 'Payload validation failed: No valid audit inputs provided.' });
     }
 
@@ -74,7 +81,14 @@ app.post('/api/v1/audits', authenticate, async (req, res) => {
     try {
       // Push the heavy job to Redis/BullMQ with the explicit jobId
       const job = await auditQueue.add('process-audit', {
-        auditMode, targetBaseUrl, privacyPolicyUrl, privacyPolicyText, apiText, dbSchemaText, harTraffic
+        auditMode: finalAuditMode, 
+        targetBaseUrl, 
+        privacyPolicyUrl, 
+        privacyPolicyText: finalPrivacyPolicyText, 
+        apiText: finalApiText, 
+        dbSchemaText: finalDbSchemaText, 
+        harTraffic: finalHarTraffic,
+        live_data
       }, { jobId });
 
       res.status(202).json({
@@ -90,6 +104,49 @@ app.post('/api/v1/audits', authenticate, async (req, res) => {
   } catch (err) {
     logger.error(`Audit queueing failed: ${err.message}`);
     res.status(500).json({ error: 'Queue/DB integration error', details: err.message });
+  }
+});
+
+// 1.2 Initialize Traffic Session
+app.post('/api/v1/audits/init-traffic-session', authenticate, async (req, res) => {
+  try {
+    const { v4: uuidv4 } = require('uuid');
+    const jobId = uuidv4();
+    await query(`INSERT INTO audits (id, user_id, status) VALUES ($1, $2, $3)`, [jobId, req.user.id, 'gathering_traffic']);
+    res.json({ auditJobId: jobId });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 1.3 Submit from Traffic Layer
+app.post('/api/v1/audits/from-traffic', async (req, res) => {
+  try {
+    const serviceKey = req.headers['x-service-key'];
+    if (serviceKey !== process.env.SERVICE_API_KEY && serviceKey !== 'internal_service_key_here') {
+      return res.status(403).json({ error: 'Unauthorized service' });
+    }
+
+    const { audit_id, audit_mode, source, session_id, live_data } = req.body;
+    
+    const dbRes = await query(`SELECT * FROM audits WHERE id = $1`, [audit_id]);
+    if (dbRes.rowCount === 0) return res.status(404).json({ error: 'Audit tracking row not found. Invalid audit_id.' });
+
+    await query(`UPDATE audits SET status = $1 WHERE id = $2`, ['queued', audit_id]);
+    
+    await auditQueue.add('audit', {
+      auditId: audit_id,
+      auditMode: audit_mode,
+      live_data: live_data,
+      apiText: '',
+      privacyPolicyText: '',
+      targetBaseUrl: ''
+    }, { jobId: audit_id });
+
+    res.json({ success: true });
+  } catch (err) {
+    logger.error(`Failed ingesting from traffic: ${err.message}`);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -137,11 +194,36 @@ app.get('/api/v1/audits/:id/report', authenticate, async (req, res) => {
       return res.status(400).json({ error: `Report not ready. Status: ${dbRes.rows[0].status}` });
     }
 
-    // Fetch the raw massive structural object from Mongo
-    const report = await AuditReport.findOne({ jobId: req.params.id }, '-_id -__v');
+    // Fetch the raw massive structural object from Mongo. We use lean() to allow modification.
+    const report = await AuditReport.findOne({ jobId: req.params.id }, '-_id -__v').lean();
     if (!report) return res.status(404).json({ error: 'Report data missing from MongoDB. It may have expired.' });
 
+    // Link the unique requestly bundle API path to the report
+    if (report.requestlyMockData) {
+      report.requestly_import_url = `${req.protocol}://${req.get('host')}/api/v1/audits/${req.params.id}/requestly.json`;
+    }
+
     res.json(report);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. Fetch Requestly Mock Data (Reads from MongoDB)
+app.get('/api/v1/audits/:id/requestly.json', authenticate, async (req, res) => {
+  try {
+    const dbRes = await query(`SELECT status FROM audits WHERE id = $1 AND user_id = $2`, [req.params.id, req.user.id]);
+    if (dbRes.rowCount === 0) return res.status(404).json({ error: 'Audit job not found for this user' });
+    if (dbRes.rows[0].status !== 'completed') {
+      return res.status(400).json({ error: `Report not ready.` });
+    }
+
+    const report = await AuditReport.findOne({ jobId: req.params.id }, '-_id -__v').lean();
+    if (!report || !report.requestlyMockData) {
+      return res.status(404).json({ error: 'Requestly data missing from report.' });
+    }
+
+    res.json(report.requestlyMockData);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

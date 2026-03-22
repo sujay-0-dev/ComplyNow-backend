@@ -31,6 +31,14 @@ const AuditReportSchema = new mongoose.Schema({
     type: Array,
     default: []
   },
+  projected_score: {
+    type: Object,
+    required: false
+  },
+  meta: {
+    type: Object,
+    required: false
+  },
   requestlyMockData: {
     type: Object, // Built schema rules
     required: false

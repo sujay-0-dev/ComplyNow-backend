@@ -44,6 +44,8 @@ const auditWorker = new Worker('complynow-audit-queue', async (job) => {
           traffic_findings: workerResult?.result?.traffic_findings || [],
           contradictions: workerResult?.result?.contradictions || [],
           fix_simulations: workerResult?.result?.fix_simulations || [],
+          projected_score: workerResult?.result?.projected_score || null,
+          meta: workerResult?.result?.meta || {},
           requestlyMockData: workerResult?.requestlyImportPayload || null
         });
 

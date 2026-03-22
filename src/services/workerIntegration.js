@@ -199,10 +199,12 @@ async function submitAuditToWorker({
 
     const workerResponse = await response.json();
 
+    const requestlyBundle = buildRequestlySharedList(workerResponse.fix_simulations);
+
     return {
       requestId,
       result: workerResponse,
-      requestlyImportPayload: workerResponse.requestly_bundle || null
+      requestlyImportPayload: requestlyBundle || workerResponse.requestly_bundle || null
     };
   } catch (error) {
     logger.error(`Failed executing audit on worker: ${error.message}`);

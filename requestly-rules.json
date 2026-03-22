@@ -1,0 +1,106 @@
+{
+  "comment": "Sample Requestly HTTP Rules configuration. See src/middleware/requestlyRules.js for schema details.",
+  "rules": [
+    {
+      "id": "rule-delay-1",
+      "name": "Delay Audits API",
+      "ruleType": "delay",
+      "status": "Active",
+      "pairs": [
+        {
+          "source": {
+            "key": "Method",
+            "operator": "Equals",
+            "value": "POST"
+          },
+          "delay": 2000
+        },
+        {
+          "source": {
+            "key": "Path",
+            "operator": "Equals",
+            "value": "/api/v1/audits"
+          },
+          "delay": 2000
+        }
+      ]
+    },
+    {
+      "id": "rule-mock-health",
+      "name": "Mock Health API Degraded",
+      "ruleType": "mockResponse",
+      "status": "Active",
+      "pairs": [
+        {
+          "source": {
+            "key": "Path",
+            "operator": "StartsWith",
+            "value": "/api/v1/health"
+          },
+          "destination": {
+            "statusCode": 503,
+            "body": "{\"status\":\"degraded\",\"requestly\":true,\"message\":\"Mocked by Requestly Rule\"}",
+            "headers": {
+              "Content-Type": "application/json"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "rule-add-header",
+      "name": "Inject Test Header",
+      "ruleType": "addHeader",
+      "status": "Active",
+      "pairs": [
+        {
+          "source": {
+            "key": "Url",
+            "operator": "Contains",
+            "value": "/api/v1"
+          },
+          "header": {
+            "key": "X-Requestly-Test",
+            "value": "true"
+          }
+        }
+      ]
+    },
+    {
+      "id": "rule-modify-score",
+      "name": "Zero Out Audit Score",
+      "ruleType": "modifyResponse",
+      "status": "Active",
+      "pairs": [
+        {
+          "source": {
+            "key": "Path",
+            "operator": "Matches",
+            "value": "^\\/api\\/v1\\/audits\\/.*\\/report$"
+          },
+          "modifications": {
+            "body": {
+              "type": "Code",
+              "value": "try { var data = JSON.parse(body); if(data.summary) data.summary.overallScore = 0; return JSON.stringify(data); } catch(e) { return body; }"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "rule-block-admin",
+      "name": "Block Admin Routes",
+      "ruleType": "blockRequest",
+      "status": "Inactive",
+      "pairs": [
+        {
+          "source": {
+            "key": "Path",
+            "operator": "Contains",
+            "value": "/admin"
+          }
+        }
+      ]
+    }
+  ]
+}
