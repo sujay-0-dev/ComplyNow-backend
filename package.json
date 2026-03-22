@@ -4,8 +4,8 @@
   "description": "ComplyNow backend integration with Requestly",
   "main": "src/server.js",
   "scripts": {
-    "start": "node --env-file=.env src/server.js",
-    "dev": "node --env-file=.env src/server.js",
+    "start": "node src/server.js",
+    "dev": "node src/server.js",
     "test": "node src/tests/requestly.test.js"
   },
   "dependencies": {
