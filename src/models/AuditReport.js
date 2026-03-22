@@ -43,6 +43,14 @@ const AuditReportSchema = new mongoose.Schema({
     type: Object, // Built schema rules
     required: false
   },
+  fixes: {
+    type: Object,
+    default: {}
+  },
+  requestlyFixRules: {
+    type: Object,
+    required: false
+  },
   createdAt: {
     type: Date,
     default: Date.now,

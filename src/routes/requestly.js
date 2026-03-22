@@ -221,6 +221,26 @@ router.delete('/har', authenticate, async (req, res) => {
 });
 
 // GET /requestly/status
+// GET /requestly/fix-rules/:id
+router.get('/fix-rules/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const auditId = id.replace('-api', '');
+
+    const AuditReport = require('../models/AuditReport');
+    const report = await AuditReport.findOne({ jobId: auditId }).lean();
+
+    if (!report || !report.requestlyFixRules) {
+      return res.status(404).json({ error: 'Auto-fix Requestly rules not found for this audit' });
+    }
+
+    res.json(report.requestlyFixRules);
+  } catch (err) {
+    logger.error(`Error fetching fix rules: ${err.message}`);
+    res.status(500).json({ error: 'Internal server error while fetching rules' });
+  }
+});
+
 router.get('/status', authenticate, async (req, res) => {
   res.json({
     enabled: requestlyConfig.enabled,

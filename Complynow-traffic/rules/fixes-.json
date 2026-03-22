@@ -1,0 +1,11 @@
+{
+  "version": "2",
+  "rules": [],
+  "groups": [
+    {
+      "id": "complynow-fixes",
+      "name": "ComplyNow — Compliance Fixes",
+      "status": "Active"
+    }
+  ]
+}
